@@ -1,0 +1,253 @@
+from flask import Flask, request, redirect, render_template_string, session
+import sqlite3
+import os
+import hashlib
+import logging
+
+app = Flask(__name__)
+app.secret_key = "super_secret_key_for_demo"
+
+DATABASE = "security_demo.db"
+
+# -------------------------------
+# Logging Configuration
+# -------------------------------
+logging.basicConfig(
+    filename="security.log",
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# -------------------------------
+# Database Setup
+# -------------------------------
+def init_db():
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            username TEXT,
+            password TEXT,
+            role TEXT
+        )
+    """)
+
+    # Insert default admin if not exists
+    cursor.execute("SELECT * FROM users WHERE username='admin'")
+    if not cursor.fetchone():
+        hashed = hashlib.sha256("admin123".encode()).hexdigest()
+        cursor.execute(
+            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            ("admin", hashed, "admin")
+        )
+
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# -------------------------------
+# Utility Functions
+# -------------------------------
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def log_attack(message):
+    logging.warning(f"SECURITY ALERT: {message}")
+
+# -------------------------------
+# Home Page
+# -------------------------------
+@app.route("/")
+def home():
+    return """
+    <h1>Security Demo Application</h1>
+    <ul>
+        <li><a href='/register'>Register</a></li>
+        <li><a href='/login_vulnerable'>Login (Vulnerable)</a></li>
+        <li><a href='/login_secure'>Login (Secure)</a></li>
+        <li><a href='/buffer_demo'>Buffer Overflow Demo</a></li>
+    </ul>
+    """
+
+# -------------------------------
+# Registration
+# -------------------------------
+@app.route("/register", methods=["GET", "POST"])
+def register():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = hash_password(request.form["password"])
+
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO users (username, password, role) VALUES (?, ?, ?)",
+            (username, password, "user")
+        )
+        conn.commit()
+        conn.close()
+
+        return "User Registered Successfully"
+
+    return """
+    <h2>Register</h2>
+    <form method="post">
+        Username: <input name="username"><br>
+        Password: <input name="password" type="password"><br>
+        <input type="submit">
+    </form>
+    """
+
+# -------------------------------
+# SQL Injection - Vulnerable Login
+# -------------------------------
+@app.route("/login_vulnerable", methods=["GET", "POST"])
+def login_vulnerable():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = request.form["password"]
+
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+
+        # ❌ Vulnerable Query (String Concatenation)
+        query = f"SELECT * FROM users WHERE username = '{username}' AND password = '{hash_password(password)}'"
+        print("Executing Query:", query)
+
+        try:
+            cursor.execute(query)
+            user = cursor.fetchone()
+
+            if user:
+                session["user"] = user[1]
+                return redirect("/dashboard")
+            else:
+                return "Invalid Credentials"
+        except Exception as e:
+            log_attack(f"SQL Injection Attempt: {str(e)}")
+            return "Error occurred"
+
+    return """
+    <h2>Login (Vulnerable to SQL Injection)</h2>
+    <form method="post">
+        Username: <input name="username"><br>
+        Password: <input name="password" type="password"><br>
+        <input type="submit">
+    </form>
+    """
+
+# -------------------------------
+# SQL Injection - Secure Login
+# -------------------------------
+@app.route("/login_secure", methods=["GET", "POST"])
+def login_secure():
+    if request.method == "POST":
+        username = request.form["username"]
+        password = hash_password(request.form["password"])
+
+        conn = sqlite3.connect(DATABASE)
+        cursor = conn.cursor()
+
+        # ✅ Secure Parameterized Query
+        cursor.execute(
+            "SELECT * FROM users WHERE username = ? AND password = ?",
+            (username, password)
+        )
+
+        user = cursor.fetchone()
+
+        if user:
+            session["user"] = user[1]
+            return redirect("/dashboard")
+        else:
+            return "Invalid Credentials"
+
+    return """
+    <h2>Login (Secure Version)</h2>
+    <form method="post">
+        Username: <input name="username"><br>
+        Password: <input name="password" type="password"><br>
+        <input type="submit">
+    </form>
+    """
+
+# -------------------------------
+# Dashboard
+# -------------------------------
+@app.route("/dashboard")
+def dashboard():
+    if "user" not in session:
+        return redirect("/")
+
+    return f"""
+    <h2>Welcome {session['user']}</h2>
+    <a href='/logout'>Logout</a>
+    """
+
+# -------------------------------
+# Logout
+# -------------------------------
+@app.route("/logout")
+def logout():
+    session.clear()
+    return redirect("/")
+
+# -------------------------------
+# Simulated Buffer Overflow Demo
+# -------------------------------
+@app.route("/buffer_demo", methods=["GET", "POST"])
+def buffer_demo():
+    if request.method == "POST":
+        data = request.form["data"]
+
+        buffer_size = 20  # Simulated fixed buffer
+
+        if len(data) > buffer_size:
+            log_attack("Simulated Buffer Overflow Detected")
+            return "⚠ Buffer Overflow Detected! Input too large."
+
+        # Simulated buffer allocation
+        buffer = [""] * buffer_size
+        for i in range(len(data)):
+            buffer[i] = data[i]
+
+        return f"Stored in buffer: {''.join(buffer).strip()}"
+
+    return """
+    <h2>Simulated Buffer Overflow Demo</h2>
+    <p>Enter text (Max 20 characters)</p>
+    <form method="post">
+        Data: <input name="data"><br>
+        <input type="submit">
+    </form>
+    """
+
+# -------------------------------
+# Admin Panel (View Users)
+# -------------------------------
+@app.route("/admin")
+def admin():
+    if "user" not in session:
+        return redirect("/")
+
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+    cursor.execute("SELECT id, username, role FROM users")
+    users = cursor.fetchall()
+    conn.close()
+
+    output = "<h2>All Users</h2><ul>"
+    for u in users:
+        output += f"<li>ID: {u[0]} | Username: {u[1]} | Role: {u[2]}</li>"
+    output += "</ul>"
+
+    return output
+
+# -------------------------------
+# Application Entry Point
+# -------------------------------
+if __name__ == "__main__":
+    app.run(debug=True)
